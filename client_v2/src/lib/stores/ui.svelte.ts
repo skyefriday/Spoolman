@@ -4,12 +4,22 @@
 // +page.ts load. What remains here is the transient add-spools modal, which has
 // no place in the address bar.
 
+/** A product barcode the Add-spools modal was opened for. */
+export interface ScannedBarcode {
+	/** The normalized code (see utils/barcode). */
+	code: string;
+	/** How many filaments already carry it: 0 is a new code, 2+ is ambiguous. */
+	matches: number;
+}
+
 class UiState {
 	/** "Add spools" modal. `addModalFilamentId` pre-seeds it with a filament. */
 	addModalOpen = $state(false);
 	addModalFilamentId = $state<string | null>(null);
 	/** When set, the modal opens on a new-filament form copied from this filament. */
 	addModalDuplicateId = $state<string | null>(null);
+	/** When set, the modal was opened by scanning this barcode, and links it on submit. */
+	addModalBarcode = $state<ScannedBarcode | null>(null);
 
 	/** QR-code scanner modal (camera). */
 	scannerOpen = $state(false);
@@ -18,6 +28,18 @@ class UiState {
 	openAddModal(filamentId?: string) {
 		this.addModalFilamentId = filamentId ?? null;
 		this.addModalDuplicateId = null;
+		this.addModalBarcode = null;
+		this.addModalOpen = true;
+	}
+	/**
+	 * Open the Add-spools modal for a scanned product barcode: straight to the spool
+	 * form when exactly one filament carries it (`filamentId`), otherwise on the
+	 * filament picker so the code can be linked to whichever one is chosen.
+	 */
+	openAddModalForBarcode(barcode: ScannedBarcode, filamentId: string | null) {
+		this.addModalFilamentId = filamentId;
+		this.addModalDuplicateId = null;
+		this.addModalBarcode = barcode;
 		this.addModalOpen = true;
 	}
 	/**
@@ -28,12 +50,14 @@ class UiState {
 	openDuplicateModal(filamentId: string) {
 		this.addModalFilamentId = null;
 		this.addModalDuplicateId = filamentId;
+		this.addModalBarcode = null;
 		this.addModalOpen = true;
 	}
 	closeAddModal() {
 		this.addModalOpen = false;
 		this.addModalFilamentId = null;
 		this.addModalDuplicateId = null;
+		this.addModalBarcode = null;
 	}
 
 	openScanner() {

@@ -18,6 +18,7 @@ import { listReaders, type TagScan } from '$lib/api/scanRelay';
 
 const READER_KEY = 'spoolman-v2-scanner-reader';
 const AUTO_NAVIGATE_KEY = 'spoolman-v2-scanner-auto-navigate';
+const KEYBOARD_KEY = 'spoolman-v2-scanner-keyboard';
 
 function read(key: string): string | null {
 	if (typeof localStorage === 'undefined') return null;
@@ -83,6 +84,10 @@ class ScannerState {
 	/** Whether a scan matching a spool or filament navigates this browser to it.
 	 *  Off by default — a page that navigates itself unasked is hostile. */
 	autoNavigate = $state(false);
+	/** Whether this browser listens for a keyboard-wedge barcode scanner. On by
+	 *  default: unlike a tag in the next room, a scan here is someone at this screen
+	 *  deliberately pointing a scanner at it, and human typing never trips it. */
+	keyboardScanner = $state(true);
 
 	/**
 	 * Reader id → the friendly name that reader last gave, from the server's
@@ -112,6 +117,7 @@ class ScannerState {
 	constructor() {
 		this.pairedReaderId = read(READER_KEY);
 		this.autoNavigate = read(AUTO_NAVIGATE_KEY) === 'true';
+		this.keyboardScanner = read(KEYBOARD_KEY) !== 'false';
 	}
 
 	/** The pool to subscribe to: the paired reader, or null for all of them. */
@@ -227,6 +233,11 @@ class ScannerState {
 	setAutoNavigate(on: boolean) {
 		this.autoNavigate = on;
 		write(AUTO_NAVIGATE_KEY, String(on));
+	}
+
+	setKeyboardScanner(on: boolean) {
+		this.keyboardScanner = on;
+		write(KEYBOARD_KEY, String(on));
 	}
 
 	/**

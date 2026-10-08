@@ -11,7 +11,9 @@
 	import { theme } from '$lib/stores/theme.svelte';
 	import { startLiveSync } from '$lib/api/liveSync';
 	import { scanRelay } from '$lib/api/scanRelay';
-	import { scanner, isBrowsableRoute } from '$lib/stores/scanner.svelte';
+	import { scanner, isBrowsableRoute, isTypingTarget } from '$lib/stores/scanner.svelte';
+	import { WedgeDetector } from '$lib/utils/barcode';
+	import { handleScannedCode } from '$lib/library/scan';
 	import { toasts } from '$lib/stores/toasts.svelte';
 	import { inventory } from '$lib/stores/inventory.svelte';
 	import { getLocale, getTextDirection } from '$lib/paraglide/runtime';
@@ -22,6 +24,8 @@
 	import type { Snippet } from 'svelte';
 
 	let { children }: { children: Snippet } = $props();
+
+	const wedge = new WedgeDetector();
 
 	// Keep <html data-theme> in sync with the preference (and OS changes when set
 	// to "system"). The initial paint is already themed by the inline script in
@@ -105,6 +109,26 @@
 	});
 </script>
 
+<!-- A keyboard-wedge barcode scanner types its code and presses Enter. Listened for
+     on the whole page so a scan works wherever you are, but only while focus is not
+     in a field: there the scanner is just a fast keyboard, and the code belongs in
+     whatever is being typed. -->
+<svelte:window
+	onkeydown={(e) => {
+		if (!scanner.keyboardScanner || e.repeat) return;
+		if (e.ctrlKey || e.metaKey || e.altKey || isTypingTarget(e.target as Element | null)) {
+			wedge.reset();
+			return;
+		}
+		const code = wedge.feed(e.key, e.timeStamp);
+		if (code === null) return;
+		// The Enter that ended the scan would otherwise click whatever button has focus
+		// (and a Tab would move focus).
+		e.preventDefault();
+		void handleScannedCode(code);
+	}}
+/>
+
 <div class="app">
 	<TopBar onadd={() => ui.openAddModal()} onscan={() => ui.openScanner()} />
 
@@ -116,6 +140,7 @@
 	open={ui.addModalOpen}
 	presetFilamentId={ui.addModalFilamentId}
 	duplicateFilamentId={ui.addModalDuplicateId}
+	barcode={ui.addModalBarcode}
 	onclose={() => ui.closeAddModal()}
 />
 

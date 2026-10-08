@@ -7,6 +7,15 @@
 	import DateTimeField from './DateTimeField.svelte';
 	import X from '@lucide/svelte/icons/x';
 	import Plus from '@lucide/svelte/icons/plus';
+	import ScanBarcode from '@lucide/svelte/icons/scan-barcode';
+	import Printer from '@lucide/svelte/icons/printer';
+	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
+	import { linkBarcode } from '$lib/api/barcodes';
+	import { openSearchResult } from '$lib/library/params';
+	import { toasts } from '$lib/stores/toasts.svelte';
+	import type { ScannedBarcode } from '$lib/stores/ui.svelte';
+	import { BARCODE_FIELD_KEY, decodeTextExtra, hasBarcode } from '$lib/utils/barcode';
 	import ExtraFieldsSection from './ExtraFieldsSection.svelte';
 	import NewFilamentCards from './NewFilamentCards.svelte';
 	import type { Filament, Extra, MultiColorDirection } from '$lib/types';
@@ -19,6 +28,7 @@
 	import { externalColors, externalDirection, type ExternalFilament } from '$lib/api/external';
 	import { ExternalSearch } from '$lib/api/externalSearch.svelte';
 	import { roundGrams, weightAuto } from '$lib/utils/format';
+	import { filamentLabel } from '$lib/utils/library';
 	import { numErr } from '$lib/utils/validate';
 	import {
 		FILAMENT_ADVANCED_KEYS,
@@ -38,15 +48,31 @@
 		presetFilamentId?: string | null;
 		/** When set, open straight to step 2 on a new filament copied from this one. */
 		duplicateFilamentId?: string | null;
+		/** When set, the modal was opened by scanning this product barcode. */
+		barcode?: ScannedBarcode | null;
 		onclose?: () => void;
 	}
-	let { open, presetFilamentId = null, duplicateFilamentId = null, onclose }: Props = $props();
+	let {
+		open,
+		presetFilamentId = null,
+		duplicateFilamentId = null,
+		barcode = null,
+		onclose
+	}: Props = $props();
 
 	// A chosen filament is one from the local catalog, a SpoolmanDB entry, or —
 	// when `creating` — a brand-new filament described by the `nf` form.
 	type Choice = { source: 'catalog'; filament: Filament } | { source: 'external'; ext: ExternalFilament };
 
-	let step = $state<1 | 2>(1);
+	// Step 3 only exists for a scan: what was just added, and the label to print for
+	// it, while the next scan waits.
+	let step = $state<1 | 2 | 3>(1);
+	// The scanned barcode this session is for. A copy of the prop rather than the prop
+	// itself, because it is spent once linked: "Add & new" carries on without it.
+	let scanned = $state<ScannedBarcode | null>(null);
+	// What the last scan-driven submit created, for step 3.
+	let addedIds = $state<number[]>([]);
+	let addedName = $state('');
 	let query = $state('');
 	let searchInput = $state<HTMLInputElement | undefined>();
 	let localResults = $state<Filament[]>([]);
@@ -135,6 +161,10 @@
 	$effect(() => {
 		if (open && !initialized) {
 			initialized = true;
+			scanned = barcode;
+			// A code on several filaments: search for it, which lists exactly those
+			// (search matches extra fields), so the right one is a click away.
+			if (barcode && barcode.matches > 1) query = barcode.code;
 			runSearch();
 			fields.ensure('spool');
 			fields.ensure('filament');
@@ -152,6 +182,9 @@
 			}
 		} else if (!open) {
 			initialized = false;
+			// Closed from outside (a new scan replacing a finished one) skips close(),
+			// so make sure the next open starts from the top either way.
+			untrack(reset);
 		}
 	});
 
@@ -317,7 +350,11 @@
 		// advanced block: it's what makes the copy visibly a copy.
 		showAdvanced = true;
 		nf = filamentDraftFrom(f, inventory.vendorById(f.vendorId)?.name ?? '');
-		filamentExtra = withDefaults('filament', { ...f.extra });
+		// The barcode goes the way of the article number: it names the source's colour,
+		// and copying it would make one scan match two filaments.
+		const copied = { ...f.extra };
+		delete copied[BARCODE_FIELD_KEY];
+		filamentExtra = withDefaults('filament', copied);
 		// Not copied from the source's manufacturer: a duplicate keeps that same
 		// manufacturer record, and these values only ever reach a newly created one.
 		vendorExtra = withDefaults('vendor', {});
@@ -331,6 +368,9 @@
 
 	function reset() {
 		step = 1;
+		scanned = null;
+		addedIds = [];
+		addedName = '';
 		query = '';
 		localResults = [];
 		extSearch.clear();
@@ -381,6 +421,20 @@
 				filamentId = Number(chosen!.filament.id);
 			}
 
+			// Remember the scanned code on the filament before adding spools, so the next
+			// scan of it lands straight on the spool form. A failure here is reported but
+			// does not stop the spools: they are what was asked for.
+			const scan = scanned;
+			if (scan && !scanLinked) {
+				try {
+					await linkBarcode(String(filamentId), scan.code);
+				} catch (e) {
+					toasts.error(
+						m['barcode.add.linkFailed']({ code: scan.code, error: String((e as Error)?.message ?? e) })
+					);
+				}
+			}
+
 			const n = countN;
 			const net = Number(netWeight) || 0;
 			const spool = Number(spoolWeight) || 0;
@@ -404,8 +458,19 @@
 			if (lastUsed) body.last_used = lastUsed;
 			if (Object.keys(extraValues).length) body.extra = extraValues;
 
-			for (let i = 0; i < n; i++) await spoolSource.createSpool(body);
-			if (andAnother && created) {
+			const ids: number[] = [];
+			for (let i = 0; i < n; i++) ids.push((await spoolSource.createSpool(body)).id);
+			if (scan && !andAnother) {
+				// A scan is one roll in hand, usually followed by the next: show what was
+				// added and offer its label instead of closing, and let the next scan
+				// replace this step without a click.
+				const f = inventory.filamentById(String(filamentId));
+				addedName = f ? filamentLabel(f, inventory.vendorById(f.vendorId)) : '';
+				addedIds = ids;
+				scanned = null;
+				submitting = false;
+				step = 3;
+			} else if (andAnother && created) {
 				// Just added a brand-new filament: the overwhelmingly likely next entry
 				// is a sibling of it (the multi-colour shopping trip this flow exists
 				// for), so hand back the same form pre-copied instead of an empty search.
@@ -424,6 +489,25 @@
 	}
 
 	let summary = $derived(chosen || creating ? m['add.summary']({ count: countN }) : '');
+
+	// Whether the chosen filament already carries the scanned code — the "known
+	// barcode" case, where there is nothing to link and the note says so.
+	let scanLinked = $derived(
+		!!scanned &&
+			chosen?.source === 'catalog' &&
+			hasBarcode(decodeTextExtra(chosen.filament.extra[BARCODE_FIELD_KEY]), scanned.code)
+	);
+
+	function printLabels() {
+		const ids = addedIds.join(',');
+		close();
+		goto(resolve(`/labels?spools=${ids}`));
+	}
+	function showAdded() {
+		const id = addedIds[0];
+		close();
+		if (id !== undefined) openSearchResult('spool', String(id));
+	}
 
 	// --- validation ---------------------------------------------------------
 	// The filament half lives in filamentDraftErrors() — including the one rule
@@ -510,7 +594,14 @@
 		     nest the modal's interactive controls inside an interactive element.
 		     Keyboard close is handled by the window Escape listener above. -->
 		<button class="backdrop" tabindex="-1" aria-hidden="true" onclick={close}></button>
-		<div class="modal" role="dialog" aria-modal="true" tabindex="-1" bind:this={modalEl}>
+		<div
+			class="modal"
+			role="dialog"
+			aria-modal="true"
+			tabindex="-1"
+			bind:this={modalEl}
+			data-scan-replaceable={step === 3 ? '' : undefined}
+		>
 			<div class="modal-head">
 				<span class="title">{m['topbar.addSpools']()}</span>
 				{#if step === 2}
@@ -521,8 +612,36 @@
 				<button class="x" onclick={close} aria-label={m['buttons.close']()}><X size={16} /></button>
 			</div>
 
-			{#if step === 1}
+			{#if step === 3}
+				<div class="body done">
+					<div class="done-title">{m['barcode.done.title']({ count: addedIds.length })}</div>
+					{#if addedName}<div class="done-name">{addedName}</div>{/if}
+					<div class="done-ids mono">{addedIds.map((id) => `#${id}`).join(' ')}</div>
+					<div class="done-actions">
+						<Button onclick={printLabels}>
+							<Printer size={15} />
+							{m['barcode.done.printLabel']({ count: addedIds.length })}
+						</Button>
+						<Button variant="outline" onclick={showAdded}>{m['barcode.done.show']()}</Button>
+						<Button variant="ghost" onclick={close}>{m['buttons.close']()}</Button>
+					</div>
+					<div class="scan-note quiet">
+						<ScanBarcode size={15} />
+						<span>{m['barcode.done.next']()}</span>
+					</div>
+				</div>
+			{:else if step === 1}
 				<div class="body">
+					{#if scanned}
+						<div class="scan-note">
+							<ScanBarcode size={15} />
+							<span
+								>{scanned.matches > 1
+									? m['barcode.add.ambiguous']({ code: scanned.code })
+									: m['barcode.add.unknown']({ code: scanned.code })}</span
+							>
+						</div>
+					{/if}
 					<input
 						bind:this={searchInput}
 						class="search-big"
@@ -601,6 +720,16 @@
 				</div>
 			{:else}
 				<div class="body">
+					{#if scanned}
+						<div class="scan-note">
+							<ScanBarcode size={15} />
+							<span
+								>{scanLinked
+									? m['barcode.add.matched']({ code: scanned.code })
+									: m['barcode.add.willLink']({ code: scanned.code })}</span
+							>
+						</div>
+					{/if}
 					<!-- Step 2 can create up to three records at once, so it is laid out as one
 					     block per entity — manufacturer, filament, spool — each with its own
 					     heading. Without that, the fields read as one flat form and there is no
@@ -1107,6 +1236,52 @@
 		cursor: pointer;
 		background: none;
 		border: none;
+	}
+	/* Says what a scan did and what will happen to the code, above whatever the step
+	   is asking for — the one thing on screen that explains why this dialog opened. */
+	.scan-note {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+		margin-bottom: 12px;
+		padding: 8px 12px;
+		border: 1px solid var(--accent-border);
+		background: var(--accent-wash-soft);
+		border-radius: var(--radius);
+		font-size: 12px;
+		color: var(--text-2);
+		overflow-wrap: anywhere;
+	}
+	.scan-note :global(svg) {
+		flex: none;
+		margin-top: 1px;
+		color: var(--accent-soft);
+	}
+	.scan-note.quiet {
+		margin: 18px 0 0;
+		border-color: var(--border);
+		background: none;
+		color: var(--text-muted);
+	}
+	.done-title {
+		font-weight: 700;
+		font-size: 15px;
+	}
+	.done-name {
+		margin-top: 4px;
+		font-size: 13px;
+		color: var(--text-2);
+	}
+	.done-ids {
+		margin-top: 4px;
+		font-size: 12px;
+		color: var(--text-muted);
+	}
+	.done-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+		margin-top: 16px;
 	}
 	.import-note {
 		margin-top: 10px;

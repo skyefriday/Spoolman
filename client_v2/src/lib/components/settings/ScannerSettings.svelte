@@ -70,6 +70,14 @@
 </script>
 
 <Card divided>
+	<SettingRow title={m['settings.scanner.keyboard.label']()} desc={m['settings.scanner.keyboard.desc']()}>
+		<Toggle
+			checked={scanner.keyboardScanner}
+			onchange={(v) => scanner.setKeyboardScanner(v)}
+			ariaLabel={m['settings.scanner.keyboard.label']()}
+		/>
+	</SettingRow>
+
 	<SettingRow
 		title={m['settings.scanner.autoNavigate.label']()}
 		desc={m['settings.scanner.autoNavigate.desc']()}
